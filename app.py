@@ -1,104 +1,112 @@
 from flask import Flask, request, url_for, session, redirect, render_template
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import time 
-from time import gmtime, strftime
-from credentials import CLIENT_ID, CLIENT_SECRET, SECRET_KEY
-import os
+import time
+import uuid
 
-# Defining consts
-TOKEN_CODE = "token_info"
-MEDIUM_TERM = "medium_term"
+#DEFINING CONSTS
+TOKEN_INFO = "token_info"
 SHORT_TERM = "short_term"
+MEDIUM_TERM = "medium_term"
 LONG_TERM = "long_term"
+CLIENT_ID = "b3ba4659e52c42c98764656a6c6a17a6"
+CLIENT_SECRET = "43f18a3c9d08480887e77feadbc5519c"
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'
+
+def get_token():
+    token_info = session.get(TOKEN_INFO, None)
+    if not token_info:
+        return None
+
+    # Check if token has expired
+    now = int(time.time())
+    is_expired = token_info['expires_at'] - now < 60
+    if is_expired:
+        spotify_oauth = create_spotify_oauth()
+        token_info = spotify_oauth.refresh_access_token(token_info['refresh_token'])
+        session[TOKEN_INFO] = token_info
+
+    return token_info
 
 def create_spotify_oauth():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        redirect_uri=url_for("redirectPage",_external=True), 
-        scope="user-top-read user-library-read"
+        redirect_uri=url_for("redirectPage", _external=True),
+        scope="user-top-read user-library-read",
+        show_dialog=True  # Force display of Spotify auth dialog
     )
 
-app = Flask(__name__)
-app.secret_key = SECRET_KEY
-app.config['SESSION_COOKIE_NAME'] = 'Eriks Cookie'
-
-@app.route('/')
+@app.route("/")
 def index():
-    name = 'username'
-    return render_template('index.html', title='Welcome', username=name)
+    session.clear()  # Clear any existing session
+    return render_template('index.html', title='Welcome')
 
-@app.route('/login')
+@app.route("/login")
 def login():
-    sp_oauth = create_spotify_oauth()
-    auth_url = sp_oauth.get_authorize_url()
+    session.clear()  # Clear session before new login
+    spotify_oauth = create_spotify_oauth()
+    auth_url = spotify_oauth.get_authorize_url()
     return redirect(auth_url)
 
-@app.route('/redirect')
+@app.route('/redirectPage')
 def redirectPage():
-    sp_oauth = create_spotify_oauth()
-    session.clear() 
+    session.clear()  # Clear any old session data
+    spotify_oauth = create_spotify_oauth()
+    session['uuid'] = str(uuid.uuid4())
     code = request.args.get('code')
-    token_info = sp_oauth.get_access_token(code)
-    session[TOKEN_CODE] = token_info    
-    return redirect(url_for("getTracks", _external=True))
+    token_info = spotify_oauth.get_access_token(code)
+    session[TOKEN_INFO] = token_info
+    return redirect(url_for("receipt", _external=True))
 
+@app.route('/receipt')
+def receipt():
+    token_info = get_token()
+    if not token_info:
+        return redirect(url_for('login', _external=True))
+    
+    try:
+        sp = spotipy.Spotify(auth=token_info['access_token'])
+        
+        # Get user info
+        current_user = sp.current_user()
+        
+        # Get tracks for different time periods
+        short_term = sp.current_user_top_tracks(
+            limit=10,
+            offset=0,
+            time_range="short_term"
+        )
 
-def get_token(): 
-    token_info = session.get(TOKEN_CODE, None)
-    if not token_info: 
-        raise "exception"
-    now = int(time.time())
-    is_expired = token_info['expires_at'] - now < 60 
-    if (is_expired): 
-        sp_oauth = create_spotify_oauth()
-        token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
-    return token_info 
+        medium_term = sp.current_user_top_tracks(
+            limit=10,
+            offset=0,
+            time_range="medium_term"
+        )
 
-@app.route('/getTracks')
-def getTracks():
-    try: 
-        token_info = get_token()
-    except: 
-        print("user not logged in")
-        return redirect("/")
-    sp = spotipy.Spotify(
-        auth=token_info['access_token'],
-    )
+        long_term = sp.current_user_top_tracks(
+            limit=10,
+            offset=0,
+            time_range="long_term"
+        )       
+        
+        return render_template('receipt.html', 
+                             title='Your Spotify Receipt', 
+                             username=current_user['display_name'],
+                             short_term=short_term, 
+                             medium_term=medium_term, 
+                             long_term=long_term)
+    except Exception as e:
+        print(f"Error: {e}")
+        session.clear()
+        return redirect(url_for('login', _external=True))
 
-    current_user_name = sp.current_user()['display_name']
-    short_term = sp.current_user_top_tracks(
-        limit=10,
-        offset=0,
-        time_range=SHORT_TERM,
-    )
-    medium_term = sp.current_user_top_tracks(
-        limit=10,
-        offset=0,
-        time_range=MEDIUM_TERM,
-    )
-    long_term = sp.current_user_top_tracks(
-        limit=10,
-        offset=0,
-        time_range=LONG_TERM,
-    )
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
 
-    if os.path.exists(".cache"): 
-        os.remove(".cache")
-
-    return render_template('receipt.html', user_display_name=current_user_name, short_term=short_term, medium_term=medium_term, long_term=long_term, currentTime=gmtime())
-
-
-@app.template_filter('strftime')
-def _jinja2_filter_datetime(date, fmt=None):
-    return strftime("%a, %d %b %Y", date)
-
-@app.template_filter('mmss')
-def _jinja2_filter_miliseconds(time, fmt=None):
-    time = int(time / 1000)
-    minutes = time // 60 
-    seconds = time % 60 
-    if seconds < 10: 
-        return str(minutes) + ":0" + str(seconds)
-    return str(minutes) + ":" + str(seconds ) 
+if __name__ == '__main__':
+    app.run(debug=True)
